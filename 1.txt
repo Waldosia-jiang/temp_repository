@@ -1,0 +1,130 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <matplotlibcpp.h>  // 需要安装 matplotlibcpp 进行可视化
+
+namespace plt = matplotlibcpp;
+
+const double k = 0.1;  // look forward gain
+const double Lfc = 2.0;  // [m] look-ahead distance
+const double Kp = 1.0;  // speed proportional gain
+const double dt = 0.1;  // [s] time tick
+const double WB = 2.9;  // [m] wheel base of vehicle
+
+struct State {
+    double x, y, yaw, v;
+    double rear_x, rear_y;
+
+    State(double x = 0.0, double y = 0.0, double yaw = 0.0, double v = 0.0)
+        : x(x), y(y), yaw(yaw), v(v) {
+        updateRearPosition();
+    }
+
+    void update(double a, double delta) {
+        x += v * std::cos(yaw) * dt;
+        y += v * std::sin(yaw) * dt;
+        yaw += v / WB * std::tan(delta) * dt;
+        v += a * dt;
+        updateRearPosition();
+    }
+
+    double calcDistance(double point_x, double point_y) {
+        double dx = rear_x - point_x;
+        double dy = rear_y - point_y;
+        return std::hypot(dx, dy);
+    }
+
+private:
+    void updateRearPosition() {
+        rear_x = x - (WB / 2) * std::cos(yaw);
+        rear_y = y - (WB / 2) * std::sin(yaw);
+    }
+};
+
+struct TargetCourse {
+    std::vector<double> cx, cy;
+    int old_nearest_index = -1;
+
+    TargetCourse(const std::vector<double>& cx, const std::vector<double>& cy) : cx(cx), cy(cy) {}
+
+    int searchTargetIndex(const State& state, double& Lf) {
+        if (old_nearest_index == -1) {
+            double min_dist = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < cx.size(); i++) {
+                double dist = state.calcDistance(cx[i], cy[i]);
+                if (dist < min_dist) {
+                    min_dist = dist;
+                    old_nearest_index = i;
+                }
+            }
+        }
+
+        int ind = old_nearest_index;
+        double distance_this_index = state.calcDistance(cx[ind], cy[ind]);
+        while (true) {
+            if (ind + 1 >= cx.size()) break;
+            double distance_next_index = state.calcDistance(cx[ind + 1], cy[ind + 1]);
+            if (distance_this_index < distance_next_index) break;
+            ind++;
+            distance_this_index = distance_next_index;
+        }
+        old_nearest_index = ind;
+
+        Lf = k * state.v + Lfc;
+        while (Lf > state.calcDistance(cx[ind], cy[ind])) {
+            if (ind + 1 >= cx.size()) break;
+            ind++;
+        }
+        return ind;
+    }
+};
+
+double proportionalControl(double target, double current) {
+    return Kp * (target - current);
+}
+
+double purePursuitSteerControl(State& state, TargetCourse& trajectory, int& pind) {
+    double Lf;
+    int ind = trajectory.searchTargetIndex(state, Lf);
+    if (pind >= ind) ind = pind;
+
+    double tx = (ind < trajectory.cx.size()) ? trajectory.cx[ind] : trajectory.cx.back();
+    double ty = (ind < trajectory.cy.size()) ? trajectory.cy[ind] : trajectory.cy.back();
+
+    double alpha = std::atan2(ty - state.rear_y, tx - state.rear_x) - state.yaw;
+    double delta = std::atan2(2.0 * WB * std::sin(alpha) / Lf, 1.0);
+
+    pind = ind;
+    return delta;
+}
+
+int main() {
+    std::vector<double> cx, cy;
+    for (double i = 0; i < 50; i += 0.5) {
+        cx.push_back(i);
+        cy.push_back(std::sin(i / 5.0) * i / 2.0);
+    }
+
+    double target_speed = 10.0 / 3.6;
+    double T = 100.0;
+
+    State state(-0.0, -3.0, 0.0, 0.0);
+    TargetCourse target_course(cx, cy);
+    int target_ind = 0;
+    double time = 0.0;
+
+    while (T >= time && target_ind < cx.size() - 1) {
+        double ai = proportionalControl(target_speed, state.v);
+        double di = purePursuitSteerControl(state, target_course, target_ind);
+        state.update(ai, di);
+        time += dt;
+
+        plt::cla();
+        plt::plot(cx, cy, "r-");
+        plt::plot({state.x}, {state.y}, "bo");
+        plt::pause(0.01);
+    }
+    plt::show();
+    return 0;
+}
